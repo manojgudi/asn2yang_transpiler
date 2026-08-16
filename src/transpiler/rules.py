@@ -57,10 +57,10 @@ def integer(type_def: dict, location: str) -> tuple[str, str]:
         for k, b_lo, b_hi in _UINT:
             if lo >= b_lo and hi <= b_hi:
                 return f"uint{k}", f" range '{lo}..{hi}'"
-        # Out of unsigned range but non-negative -> use the smallest signed type
-        # big enough (semantics-preserving because every uint value fits in
-        # the corresponding signed range? No, it doesn't. So we need signed
-        # only if lo < 0 OR if no uint fits. Both cases covered below.)
+        # No uint fits: fall through to signed. Note: the signed range
+        # is narrower than the unsigned one for positives (int64 max =
+        # 2^63 - 1 < uint64 max = 2^64 - 1), so this loop will also fail
+        # and raise below if neither fits.
     for k, b_lo, b_hi in _INT:
         if lo >= b_lo and hi <= b_hi:
             return f"int{k}", f" range '{lo}..{hi}'"
@@ -265,7 +265,7 @@ def sequence(
             continue
 
         child_loc = f"{location} > field '{mname}'"
-        kind, body, tail = inner_emit(
+        kind, body, _tail = inner_emit(
             mtype if isinstance(mtype, str) else member["type"],
             member,
             child_loc,
@@ -277,7 +277,6 @@ def sequence(
                 mname,
                 kind,
                 body,
-                tail,
                 mandatory=mandatory,
                 default=default,
             )
@@ -289,7 +288,6 @@ def _wrap_member(
     name: str,
     kind: str,
     body: str,
-    tail: str,
     *,
     mandatory: bool = True,
     default: str | None = None,
@@ -397,8 +395,8 @@ def choice(
         aname = alt["name"]
         alt_loc = f"{location} > alternative '{aname}'"
         if isinstance(atype, str):
-            kind, body, tail = inner_emit(atype, alt, alt_loc, depth + 1, max_depth)
-            case_inner = _wrap_member(aname, kind, body, tail)
+            kind, body, _tail = inner_emit(atype, alt, alt_loc, depth + 1, max_depth)
+            case_inner = _wrap_member(aname, kind, body)
         else:
             case_inner = [
                 _emit_inline_block(
@@ -464,11 +462,15 @@ def sequence_of(
         entry = f'    list entry {{\n      key "value";\n      leaf value {{\n        type {body};{tail}\n      }}\n{size_clause}    }}'
         return entry
 
-    # Composite element type -- use a 'container' inside the list entry.
-    _, body, _ = inner_emit(
-        "__INLINE__", {"__inner__": element}, elt_loc, depth, max_depth
+    # Composite element type -- the carrier-set bijection for SEQUENCE OF
+    # only carries over cleanly when T is a leaf-like type with a fixed
+    # built-in mapping. Composite T would need an inline dispatch path
+    # we don't yet implement; raise so it's not silently wrong.
+    raise _impassable(
+        elt_loc,
+        f"SEQUENCE OF composite element type {etype!r} is not supported.",
+        "use a SEQUENCE OF <leaf-like-type> or extend sequence_of().",
     )
-    return f'    list entry {{\n      key "id";\n      leaf id {{ type uint32; }}\n      container value {{\n{body}      }}\n{size_clause}    }}'
 
 
 # ===========================================================================
@@ -487,14 +489,6 @@ def _as_identifier(name: str) -> str:
     identifiers; we mirror that style). asn1tools already gives valid
     identifiers so this is mostly a safety net."""
     return name.replace(" ", "-")
-
-
-def _assert_mandatory(member: dict, location: str) -> None:
-    """Deprecated: replaced by `_member_options` (kept for any external caller).
-
-    New code should call `_member_options` and emit `mandatory true;` and
-    `default "v";` in the YANG output rather than refusing these.
-    """
 
 
 def _member_options(member: dict, location: str) -> tuple[bool, str | None]:

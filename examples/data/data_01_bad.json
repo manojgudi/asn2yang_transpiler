@@ -1,0 +1,9 @@
+{
+    "_comment": "01_basic_types.asn -- deliberately violates: Color not in enumeration",
+    "IsActive": true,
+    "Color": "purple",
+    "Temperature": 25,
+    "TinyCount": 100,
+    "Greeting": "hello",
+    "Serial": "0102030405060708"
+}

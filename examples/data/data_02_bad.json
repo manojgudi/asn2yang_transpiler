@@ -1,0 +1,11 @@
+{
+    "_comment": "02_sequence.asn -- id=0 violates INTEGER (1..65535)",
+    "id": 0,
+    "model": "Tesla Model 3",
+    "inService": true,
+    "engine": {
+        "cylinders": 4,
+        "displacement": 1500,
+        "fuel": "electric"
+    }
+}

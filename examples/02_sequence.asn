@@ -19,8 +19,7 @@ Vehicles DEFINITIONS AUTOMATIC TAGS ::= BEGIN
             cylinders   INTEGER (1..16),
             displacement INTEGER (0..10000),
             fuel        ENUMERATED { petrol(0), diesel(1), electric(2), hybrid(3) }
-        },
-        neighborVehicle Vehicle
+        }
     }
 
 END

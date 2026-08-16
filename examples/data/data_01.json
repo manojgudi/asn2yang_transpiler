@@ -1,0 +1,9 @@
+{
+    "_comment": "01_basic_types.asn -- six independent typedefs, no single root",
+    "IsActive": true,
+    "Color": "green",
+    "Temperature": 25,
+    "TinyCount": 100,
+    "Greeting": "hello",
+    "Serial": "0102030405060708"
+}

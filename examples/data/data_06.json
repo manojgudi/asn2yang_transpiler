@@ -1,0 +1,7 @@
+{
+    "_comment": "06_optional_and_default.asn -- Contact SEQUENCE with OPTIONAL/DEFAULT",
+    "name": "Alice",
+    "email": "alice@example.com",
+    "visibility": "public",
+    "verified": false
+}

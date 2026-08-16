@@ -1,0 +1,4 @@
+{
+    "_comment": "03_choice.asn -- Payload CHOICE; one alternative is selected",
+    "text": "hello world"
+}

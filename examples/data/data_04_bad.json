@@ -1,0 +1,6 @@
+{
+    "_comment": "04_real_numbers.asn -- HumidityPct=999 violates REAL (0.0..100.0)",
+    "HumidityPct": 999.0,
+    "Voltage": 3.3,
+    "TemperatureC": 25.0
+}

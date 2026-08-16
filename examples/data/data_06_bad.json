@@ -1,0 +1,7 @@
+{
+    "_comment": "06_optional_and_default.asn -- name=200 chars violates IA5String (SIZE(1..80))",
+    "name": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "email": "alice@example.com",
+    "visibility": "public",
+    "verified": false
+}

@@ -1,0 +1,24 @@
+-- 06_optional_and_default.asn
+--
+-- Demonstrates the OPTIONAL / DEFAULT extension documented in
+-- optional.txt.  Per the paper §5.4 these were out of scope, but per
+-- the rephrase:
+--
+--   ASN.1 mandatory  -> YANG `mandatory true;`
+--   ASN.1 OPTIONAL   -> no `mandatory`  (YANG leaves are optional by default)
+--   ASN.1 DEFAULT v  -> YANG `default "v";`
+--
+-- CHOICE always emits `mandatory true;` on the choice line, never on
+-- individual cases (RFC 7950 §7.9.2 forbids the latter).
+
+Profiles DEFINITIONS AUTOMATIC TAGS ::= BEGIN
+
+    Contact ::= SEQUENCE {
+        name        IA5String (SIZE(1..80)),
+        email       IA5String (SIZE(1..120)) OPTIONAL,
+        phone       IA5String (SIZE(1..20))  OPTIONAL,
+        visibility  ENUMERATED { public(0), private(1) } DEFAULT public,
+        verified    BOOLEAN                  DEFAULT FALSE
+    }
+
+END
