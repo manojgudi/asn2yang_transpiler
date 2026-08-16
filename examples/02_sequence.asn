@@ -1,0 +1,26 @@
+-- 02_sequence.asn
+--
+-- A SEQUENCE with nested SEQUENCEs, demonstrating:
+--   - field ordering is preserved,
+--   - mandatory-only fields are required (per §5.4),
+--   - inline anonymous SEQUENCEs become containers,
+--   - a nested type reference works.
+--
+-- Expected: every SEQUENCE becomes a YANG `container` with one
+-- child per member, in declaration order.
+
+Vehicles DEFINITIONS AUTOMATIC TAGS ::= BEGIN
+
+    Vehicle ::= SEQUENCE {
+        id           INTEGER (1..65535),
+        model        IA5String (SIZE(1..40)),
+        inService    BOOLEAN,
+        engine       SEQUENCE {
+            cylinders   INTEGER (1..16),
+            displacement INTEGER (0..10000),
+            fuel        ENUMERATED { petrol(0), diesel(1), electric(2), hybrid(3) }
+        },
+        neighborVehicle Vehicle
+    }
+
+END

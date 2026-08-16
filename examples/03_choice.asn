@@ -1,0 +1,17 @@
+-- 03_choice.asn
+--
+-- Demonstrates CHOICE (paper §5.5) with distinct, non-optional
+-- alternatives. Each branch maps to a YANG `case` inside a `choice`.
+--
+-- Expected: one YANG `choice` per CHOICE, with one `case` per
+-- alternative.
+
+Messaging DEFINITIONS AUTOMATIC TAGS ::= BEGIN
+
+    Payload ::= CHOICE {
+        text    IA5String (SIZE(1..140)),
+        number  INTEGER (0..65535),
+        flag    BOOLEAN
+    }
+
+END

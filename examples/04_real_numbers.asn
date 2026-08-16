@@ -1,0 +1,21 @@
+-- 04_real_numbers.asn
+--
+-- Demonstrates REAL (paper §5.2, Eq.16). A bounded REAL carrier set
+-- maps onto YANG's `decimal64` with the smallest `fraction-digits`
+-- in {1..18} that fits both bounds.
+--
+-- Note: an *unbounded* REAL would fail to transpile because ASN.1 REAL
+-- includes +/-infinity and NaN, which decimal64 cannot represent.
+
+Sensors DEFINITIONS AUTOMATIC TAGS ::= BEGIN
+
+    -- Range 0.0 .. 100.0 -> decimal64 with fraction-digits=2
+    HumidityPct  ::= REAL (0.0 .. 100.0)
+
+    -- Range 1.0 .. 5.0 -> decimal64 with fraction-digits=2
+    Voltage      ::= REAL (1.0 .. 5.0)
+
+    -- Range -40.0 .. 85.0 -> decimal64 with fraction-digits=2
+    TemperatureC ::= REAL (-40.0 .. 85.0)
+
+END

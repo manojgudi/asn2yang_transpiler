@@ -1,0 +1,24 @@
+-- 01_basic_types.asn
+--
+-- The smallest possible module, covering each of the leaf types
+-- covered by the paper:
+--   BOOLEAN, ENUMERATED, INTEGER (with and without range),
+--   IA5String, OCTET STRING.
+--
+-- Expected: every type becomes a single `typedef` in YANG.
+
+BasicTypes DEFINITIONS AUTOMATIC TAGS ::= BEGIN
+
+    IsActive   ::= BOOLEAN
+
+    Color      ::= ENUMERATED { red(0), green(-1), blue(2) }
+
+    Temperature ::= INTEGER (-50..150)
+
+    TinyCount  ::= INTEGER (0..255)
+
+    Greeting   ::= IA5String (SIZE(1..40))
+
+    Serial     ::= OCTET STRING (SIZE(8))
+
+END

@@ -1,0 +1,37 @@
+[project]
+name = "asn1-to-yang-transpiler"
+version = "0.1.0"
+description = "Toy ASN.1 -> YANG transpiler implementing the rules from the paper 'Preserving Semantics for Transpilation of Data Modelling Languages using CafeOBJ' (Section 5)."
+requires-python = ">=3.10"
+dependencies = [
+    "asn1tools>=0.167.0",
+    "pyang>=2.6.1",
+]
+
+[project.scripts]
+# After `pip install -e .`, this puts an `asn1-to-yang` command on $PATH.
+asn1-to-yang = "transpiler.cli:main"
+
+[tool.ruff]
+# Project-relative import resolver root.
+src = ["src"]
+extend-exclude = ["examples", "paper.txt"]
+
+[tool.ruff.lint]
+# Keep the toy readable; only enforce correctness-related rules.
+select = ["E", "F", "I", "W"]
+ignore = [
+    "E501",  # line length -- YANG strings get long, leave them readable
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Generated YANG goes to stdout, so the CLI is allowed to print freely.
+"asn1_to_yang.py" = ["E402"]
+
+[tool.pyright]
+# Canonical src/ layout -- Pyright finds `transpiler` under src/ automatically.
+include = ["src/transpiler", "asn1_to_yang.py"]
+extraPaths = ["src"]
+pythonVersion = "3.10"
+reportMissingImports = "error"
+reportUndefinedVariable = "error"

@@ -1,0 +1,34 @@
+-- 05_failure_modes.asn
+--
+-- Each type below is the smallest possible example of an ASN.1 construct
+-- that the transpiler REFUSES, because per the paper its ASN.1 carrier
+-- set cannot be put into bijection with any YANG built-in.
+--
+-- Try them one at a time:
+--
+--   python -m transpiler transpile examples/05_failure_modes.asn
+--
+-- The transpiler will abort on the first failing type and print the
+-- `where / why / fix` triple from transpiler/errors.py.
+
+Failures DEFINITIONS AUTOMATIC TAGS ::= BEGIN
+
+    -- 1. INTEGER wider than any YANG built-in (paper §5.1: no YANG k).
+    WayTooBig  ::= INTEGER (-99999999999999999999 .. 99999999999999999999)
+
+    -- 2. Unbounded REAL (paper §5.2: carrier includes +/-inf and NaN).
+    FreeReal   ::= REAL
+
+    -- 3. SEQUENCE with an OPTIONAL field (paper §5.4: mandatory only).
+    Optional   ::= SEQUENCE {
+        required INTEGER,
+        optional BOOLEAN OPTIONAL
+    }
+
+    -- 4. SEQUENCE with a DEFAULT value (paper §5.4: mandatory only).
+    WithDefault ::= SEQUENCE {
+        wanted  INTEGER,
+        default INTEGER DEFAULT 0
+    }
+
+END
