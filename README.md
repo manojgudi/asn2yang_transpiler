@@ -88,8 +88,8 @@ and prints a uniform three-line `where / why / fix` banner:
   TRANSPILER ERROR
 ====================
   where : module 'X' > type 'Y' > field 'Z'
-  why   : OPTIONAL is not covered by the paper's semantic model (§5.4 …).
-  fix   : remove OPTIONAL or mark the field with a sentinel value.
+  why   : INTEGER range [-1e20, 1e20] does not fit any YANG integer …
+  fix   : split the range into multiple fields or constrain the source range.
 ```
 
 The refused constructs are exactly the ones the paper calls out as
@@ -99,10 +99,22 @@ The refused constructs are exactly the ones the paper calls out as
 | --- | --- |
 | `INTEGER` range wider than any `int64` / `uint64` | `INTEGER (-1e20 .. 1e20)` |
 | `REAL` without a value-range constraint (carrier set includes ±∞, NaN) | `REAL` |
-| `OPTIONAL` SEQUENCE members | `SEQUENCE { a INTEGER, b BOOLEAN OPTIONAL }` |
-| `DEFAULT` SEQUENCE members | `SEQUENCE { a INTEGER, b INTEGER DEFAULT 0 }` |
 | `SEQUENCE` / `CHOICE` nesting deeper than `--max-depth` | deeply recursive types |
 | Out-of-scope constructs (e.g. `EMBEDDED PDV`, `OBJECT CLASS`) | any of these |
+
+## `OPTIONAL` and `DEFAULT` support (extension per `optional.txt`)
+
+The paper's §5.4 restricts SEQUENCE members to mandatory-only. We
+extend this per the rephrase in [`optional.txt`](optional.txt):
+
+| ASN.1 | YANG sub-statement |
+| --- | --- |
+| mandatory field | `mandatory true;` |
+| `OPTIONAL` field | *(nothing — YANG leaves are optional by default)* |
+| `DEFAULT v` field | `default "v";` |
+| CHOICE (non-optional alternatives, per §5.5) | `mandatory true;` on the `choice` line, *not* on individual `case` lines |
+
+See `examples/06_optional_and_default.asn` for a runnable demonstration.
 
 ## Recursion-depth limit
 

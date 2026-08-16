@@ -229,10 +229,13 @@ def object_identifier() -> tuple[str, str]:
 def sequence(
     type_def: dict, location: str, depth: int, max_depth: int, inner_emit
 ) -> str:
-    """Paper §5.4. SEQUENCE -> YANG container with one child per member,
-    in declared order, all mandatory.
+    """Paper §5.4, extended per optional.txt.
 
-    Per the paper, OPTIONAL fields are out of scope for the semantic model.
+    SEQUENCE -> YANG container with one child per member, in declared
+    order.  Per the rephrase in optional.txt:
+        - ASN.1 mandatory  -> YANG `mandatory true;`
+        - ASN.1 OPTIONAL   -> no `mandatory` (YANG leaves are optional by default)
+        - ASN.1 DEFAULT v  -> YANG `default "v";`
     """
     _check_depth(location, depth, max_depth)
     if not type_def.get("members"):
@@ -240,7 +243,7 @@ def sequence(
 
     lines = []
     for member in type_def["members"]:
-        _assert_mandatory(member, location)
+        mandatory, default = _member_options(member, location)
         mtype = member["type"]
         mname = member["name"]
 
@@ -269,26 +272,80 @@ def sequence(
             depth + 1,
             max_depth,
         )
-        lines.extend(_wrap_member(mname, kind, body, tail))
+        lines.extend(
+            _wrap_member(
+                mname,
+                kind,
+                body,
+                tail,
+                mandatory=mandatory,
+                default=default,
+            )
+        )
     return "\n".join(lines) + "\n"
 
 
-def _wrap_member(name: str, kind: str, body: str, tail: str) -> list[str]:
-    """Format a leaf-like member. `body` is already a complete type clause
-    (terminated with ';' for plain types or '}' for constrained ones) --
-    so we just wrap it in `leaf X { type <body> }`."""
+def _wrap_member(
+    name: str,
+    kind: str,
+    body: str,
+    tail: str,
+    *,
+    mandatory: bool = True,
+    default: str | None = None,
+) -> list[str]:
+    """Format a leaf-like member.
+
+    `body` is already a complete type clause (terminated with ';' for
+    plain types or '}' for constrained ones).
+
+    Per optional.txt:
+        mandatory=True, default=None  ->  leaf X { type <body>; mandatory true; }
+        mandatory=False, default=None ->  leaf X { type <body>; }   (YANG optional default)
+        mandatory=False, default="v"  ->  leaf X { type <body>; default "v"; }
+    """
     yang_name = _as_identifier(name)
-    if kind == "leaf":
-        body = body.strip()
-        if "\n" in body:
-            # Multi-line body (enumeration). Indent each line.
-            lines = [f"    leaf {yang_name} {{", f"      type {body.split(chr(10))[0]}"]
-            for ln in body.split("\n")[1:]:
-                lines.append("      " + ln)
-            lines.append("    }")
-            return lines
-        return [f"    leaf {yang_name} {{ type {body} }}"]
-    return [body]  # already a full block
+    if kind != "leaf":
+        return [body]  # already a full block
+
+    body = body.strip()
+
+    # Sub-statements that go inside the leaf after `type ...;`
+    extras: list[str] = []
+    if mandatory:
+        extras.append("mandatory true;")
+    if default is not None:
+        extras.append(f'default "{default}";')
+
+    # Multi-line body (enumeration): always emit multi-line leaf so the
+    # indentation is consistent.
+    if "\n" in body:
+        lines = [
+            f"    leaf {yang_name} {{",
+            f"      type {body.split(chr(10))[0]}",
+        ]
+        for ln in body.split("\n")[1:]:
+            lines.append("      " + ln)
+        for ex in extras:
+            lines.append(f"      {ex}")
+        lines.append("    }")
+        return lines
+
+    # Multi-line leaf only when we have extras (mandatory / default).
+    # NB: `body` is already a complete type clause ('uint8;' or
+    # 'uint8 { range "..."; }'), so we drop it in verbatim -- no extra ';'.
+    if extras:
+        lines = [
+            f"    leaf {yang_name} {{",
+            f"      type {body}",
+        ]
+        for ex in extras:
+            lines.append(f"      {ex}")
+        lines.append("    }")
+        return lines
+
+    # Simple single-line case (no extras).
+    return [f"    leaf {yang_name} {{ type {body} }}"]
 
 
 def _emit_inline_block(
@@ -317,18 +374,24 @@ def choice(
     inner_emit,
     choice_name: str = "choice",
 ) -> str:
-    """Paper §5.5. CHOICE -> YANG 'choice' with one 'case' per alternative.
+    """Paper §5.5, extended per optional.txt.
 
-    `choice_name` is the YANG identifier for the choice node; the caller
-    passes it in because RFC 7950 requires every `choice` to have a name
-    that is unique within its enclosing container/list/grouping.
+    CHOICE -> YANG `choice { ... }` with one `case` per alternative.
+
+    Per optional.txt: ASN.1 CHOICE alternatives are non-optional (and
+    asn1tools enforces this), so we emit `mandatory true;` ONCE on the
+    `choice` line itself -- not on individual `case` lines, because
+    RFC 7950 §7.9.2 forbids `mandatory` as a sub-statement of `case`.
     """
     _check_depth(location, depth, max_depth)
     members = type_def.get("members") or []
     if not members:
         raise _impassable(location, "CHOICE has no alternatives.")
 
-    lines = [f"    choice {_as_identifier(choice_name)} {{"]
+    lines = [
+        f"    choice {_as_identifier(choice_name)} {{",
+        "      mandatory true;",
+    ]
     for alt in members:
         atype = alt["type"]
         aname = alt["name"]
@@ -427,20 +490,44 @@ def _as_identifier(name: str) -> str:
 
 
 def _assert_mandatory(member: dict, location: str) -> None:
-    if member.get("optional"):
-        raise _impassable(
-            f"{location} > field '{member['name']}'",
-            "OPTIONAL is not covered by the paper's semantic model "
-            "(§5.4 explicitly restricts to mandatory fields).",
-            "remove OPTIONAL or mark the field with a sentinel value.",
-        )
+    """Deprecated: replaced by `_member_options` (kept for any external caller).
+
+    New code should call `_member_options` and emit `mandatory true;` and
+    `default "v";` in the YANG output rather than refusing these.
+    """
+
+
+def _member_options(member: dict, location: str) -> tuple[bool, str | None]:
+    """Return (mandatory, default_yang_value) for a SEQUENCE member.
+
+    ASN.1 semantics:
+        <no keyword>          -> mandatory=True,  default=None
+        OPTIONAL              -> mandatory=False, default=None
+        DEFAULT v  (= OPTIONAL with a default) -> mandatory=False, default=YANG-formatted v
+
+    The mapping follows the rephrase in `optional.txt`:
+        - ASN.1 mandatory  -> YANG `mandatory true;`
+        - ASN.1 OPTIONAL   -> no `mandatory` (YANG leaves are optional by default)
+        - ASN.1 DEFAULT v  -> YANG `default "v";`  (plus no `mandatory true;`)
+    """
     if "default" in member:
-        raise _impassable(
-            f"{location} > field '{member['name']}'",
-            "DEFAULT values are not covered by the paper's semantic model "
-            "(§5.4 explicitly restricts to mandatory fields).",
-            "remove DEFAULT or mark the field with a sentinel value.",
-        )
+        # DEFAULT implies OPTIONAL in ASN.1.
+        return False, _format_default_value(member["default"])
+    if member.get("optional"):
+        return False, None
+    return True, None
+
+
+def _format_default_value(v) -> str:
+    """Render an ASN.1 default value as a YANG `default "<v>";` literal.
+
+    YANG's `default` substatement always takes a quoted string, regardless
+    of the underlying type.  Python booleans need a special case because
+    `str(True)` is 'True' (capitalised) but YANG wants 'true'/'false'.
+    """
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    return str(v)
 
 
 def _check_depth(location: str, depth: int, max_depth: int) -> None:
