@@ -12,12 +12,15 @@ For each pair (valid, bad) the script:
        (We do NOT modify the transpiler source -- this is purely empirical
        validation of the *output* of the transpiler.)
     2. Validates the JSON against the ASN.1 model using an *independent*
-       constraint checker (pT membership).  This is the empirical witness
-       for `Val^pT_A(T_A)` from Eq.(1).
+       constraint checker (range, enumeration membership, size, choice
+       alternative).
     3. Validates the JSON against the transpiled YANG using `yanglint`
-       (libyang).  This is the empirical witness for `Val_Y(Φ(T_A))`
-       from §4.1.
+       (libyang).
     4. Reports ASN.1 cons valid_ok / bad_caught and YANG valid_acc / bad_rej.
+
+These four checks are consistency sanity tests: a valid instance must be
+accepted by both validators and a bad instance must be rejected by both.
+They are not a proof of semantic preservation.
 
 Usage:
     python3 validate_data.py                 # all examples
@@ -47,8 +50,8 @@ WRAP_NEEDED = {"01_basic_types", "04_real_numbers"}
 
 
 # ---------------------------------------------------------------------------
-# Independent ASN.1 constraint checker -- implements pT from paper §4.1.
-# Returns list[str] of human-readable violations (empty == v in Val^pT).
+# Independent ASN.1 constraint checker. Returns list[str] of human-readable
+# violations (empty list == value satisfies all ASN.1 constraints).
 # ---------------------------------------------------------------------------
 def asn1_check_constraints(ast: dict, type_name: str, value: Any) -> list[str]:
     mod = list(ast.values())[0]
@@ -445,9 +448,8 @@ def main(argv: list[str]) -> int:
     print("  YANG valid acc   : libyang (yanglint) accepts data_NN.json")
     print("  YANG bad rej     : libyang (yanglint) rejects data_NN_bad.json")
     print()
-    print("Together these are the empirical witness for the round-trip condition")
-    print("βT ∘ τT = id on Val^pT_A from paper §4.1: the valid instance lives in")
-    print("both Val_A and Val_Y, and the bad instance lives in neither.")
+    print("These are consistency sanity checks between the ASN.1 model and the")
+    print("transpiled YANG model -- not a proof of semantic preservation.")
     return 0 if overall else 1
 
 
