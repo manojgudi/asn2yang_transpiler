@@ -49,7 +49,7 @@ def parse_asn1(text: str) -> dict:
     """
     try:
         raw = asn1tools.parse_string(text)
-    except Exception as exc:                       # asn1tools raises a generic Exception
+    except Exception as exc:  # asn1tools raises a generic Exception
         raise Asn1SyntaxError(_clean_parser_error(str(exc))) from exc
 
     if not raw:
@@ -57,6 +57,74 @@ def parse_asn1(text: str) -> dict:
 
     # asn1tools returns {module_name: module_ast}; we keep it as a dict-of-one.
     return raw
+
+
+def parse_asn1_files(paths: list[str]) -> dict:
+    """Parse multiple ASN.1 files and merge their types into a single
+    synthetic module named after the LAST file.
+
+    This is the multi-module equivalent of `parse_asn1`.  ASN.1 files
+    use `IMPORTS Foo FROM Bar;` to reference types defined in another
+    module.  For a single-file transpile we cannot resolve these
+    forward references; for a multi-file transpile we flatten every
+    module's types into one namespace so that names resolve naturally.
+
+    The LAST file is treated as the "primary" module -- its unreferenced
+    SEQUENCE types are the candidates for being emitted as the YANG
+    root container.  Every earlier file's types are treated as
+    dependencies and are only inlined at use sites.
+
+    Returns: a one-entry AST dict (module_name -> module_ast) where
+    `module_ast["types"]` contains the union of every loaded module's
+    types, and `module_ast["__multi_module__"]` is True so the
+    transpiler knows to skip top-level SEQUENCE / SET / CHOICE / SEQUENCE
+    OF (which would otherwise duplicate the inlined copies emitted at
+    use sites).  `module_ast["__root_candidates__"]` holds the set of
+    type names from the LAST file -- the transpiler emits only those
+    as top-level SEQUENCE/SET containers.
+
+    Raises Asn1SyntaxError on the first failing file.
+    """
+    if not paths:
+        raise Asn1SyntaxError("no input files given")
+
+    merged_types: dict = {}
+    primary_name: str | None = None
+    last_file_types: set[str] = set()
+
+    for path in paths:
+        text = _read_file(path)
+        per_module = parse_asn1(text)
+        per_types: set[str] = set()
+        for mod in per_module.values():
+            per_types.update((mod.get("types") or {}).keys())
+        # The LAST iteration overwrites this -- so the final value is
+        # the type names from the last file in `paths`.
+        last_file_types = per_types
+        if primary_name is None and per_module:
+            primary_name = next(iter(per_module))
+        for _mod_name, mod in per_module.items():
+            for tname, tdef in (mod.get("types") or {}).items():
+                merged_types[tname] = tdef
+
+    if primary_name is None or not merged_types:
+        raise Asn1SyntaxError("no types found in any input file")
+
+    return {
+        primary_name: {
+            "types": merged_types,
+            "__multi_module__": True,
+            "__root_candidates__": last_file_types,
+        }
+    }
+
+
+def _read_file(path: str) -> str:
+    try:
+        with open(path) as f:
+            return f.read()
+    except OSError as exc:
+        raise Asn1SyntaxError(f"cannot read {path}: {exc}") from exc
 
 
 def _clean_parser_error(msg: str) -> str:

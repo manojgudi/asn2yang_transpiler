@@ -23,31 +23,105 @@ def transpile(ast: dict, max_depth: int = DEFAULT_MAX_DEPTH) -> str:
     """Top-level entry: ASN.1 AST dict -> YANG source string.
 
     `ast` is the {module_name: module_dict} dict from `parse_asn1`.
+    A multi-module AST (from `parse_asn1_files`) is accepted: every
+    type from every loaded module is emitted into one YANG module
+    named after the primary (first) module.
     """
-    if len(ast) != 1:
-        raise ValueError(
-            f"expected exactly one module per file, got {len(ast)}: {list(ast.keys())}"
-        )
+    if not ast:
+        raise ValueError("empty AST: no modules to transpile")
 
-    ((mod_name, mod),) = ast.items()
-    types = mod.get("types") or {}
+    primary_name = next(iter(ast))
+    types: dict = {}
+    for mod in ast.values():
+        types.update(mod.get("types") or {})
 
     # 1.  module header (YANG requires namespace + prefix at minimum).
-    lines = [_module_header(mod_name)]
+    lines = [_module_header(primary_name)]
 
     # 2.  one typedef per ASN.1 type.  SEQUENCE / CHOICE top-level
     #     become a 'container' (YANG requires `choice` to live inside
     #     a container, list, case, or grouping -- never directly under
-    #     a typedef).  Everything else becomes a `typedef` so that the
-    #     name is reusable.
+    #     a typedef).  SEQUENCE OF / SET OF at the top level cannot be
+    #     typedef'd in YANG (a `list` requires an identifier and
+    #     typedefs don't allow lists), so we skip them -- every use
+    #     site inlines the list via `sequence()`'s named-type lookup.
+    #
+    #     In multi-module mode (ast carries the `__multi_module__`
+    #     flag set by `parse_asn1_files`), every SEQUENCE / SET /
+    #     CHOICE / SEQUENCE OF that is *referenced* as a member type
+    #     in another SEQUENCE is omitted from the top level -- those
+    #     are inlined at the use site.  An unreferenced top-level
+    #     type (i.e. the "root" type that nothing else references)
+    #     is still emitted as a container so the JSON has something
+    #     to anchor on.
+    is_multi_module = any(mod.get("__multi_module__") for mod in ast.values())
+    referenced: set[str] = set()
+    if is_multi_module:
+        for tdef in types.values():
+            # Direct member references from SEQUENCE / SET / CHOICE.
+            for member in tdef.get("members") or []:
+                if member is None:
+                    continue
+                mtype = member.get("type")
+                if isinstance(mtype, str):
+                    referenced.add(mtype)
+            # Element types of SEQUENCE OF / SET OF (inlined at use sites).
+            if tdef.get("type") in ("SEQUENCE OF", "SET OF"):
+                elem = tdef.get("element") or {}
+                etype = elem.get("type")
+                if isinstance(etype, str):
+                    referenced.add(etype)
     for tname, tdef in types.items():
-        location = f"module '{mod_name}' > type '{tname}'"
+        location = f"module '{primary_name}' > type '{tname}'"
         if tdef["type"] in ("SEQUENCE", "SET"):
-            lines.append(_sequence_container(tname, tdef, location, max_depth))
+            if is_multi_module and tname in referenced:
+                continue  # inlined at use sites
+            if is_multi_module and tname not in referenced:
+                # Unreferenced top-level SEQUENCE -- only emit it as a
+                # root container if it came from the LAST (primary)
+                # file.  Orphan types from imported modules are
+                # skipped, otherwise libyang complains about their
+                # mandatory fields being missing from the JSON.
+                root_candidates = set()
+                for mod in ast.values():
+                    root_candidates |= mod.get("__root_candidates__", set())
+                if tname not in root_candidates:
+                    continue
+                # The PRIMARY root SEQUENCE is emitted WITHOUT a
+                # wrapping container: its members appear directly at
+                # module top level.  This matches ASN.1 JER-style
+                # JSON, where the root SEQUENCE's fields are at the
+                # top of the encoded message rather than wrapped in a
+                # named object.  Mirrors the structure used by the
+                # hand-coded `cam-payload` reference YANG, which has
+                # `generationDeltaTime` etc. directly under the
+                # payload grouping.
+                body = rules.sequence(
+                    tdef,
+                    location,
+                    depth=0,
+                    max_depth=max_depth,
+                    inner_emit=_emit_type,
+                    ast=ast,
+                )
+                # sequence() emits at 4-space depth for top-level
+                # containers (depth=1).  At depth=0 we want 2 spaces.
+                for ln in body.rstrip("\n").split("\n"):
+                    if ln.startswith("    "):
+                        lines.append("  " + ln[4:])
+                    else:
+                        lines.append(ln)
+                continue
+            lines.append(_sequence_container(tname, tdef, location, max_depth, ast))
         elif tdef["type"] == "CHOICE":
-            lines.append(_choice_container(tname, tdef, location, max_depth))
+            if is_multi_module and tname in referenced:
+                continue  # inlined at use sites
+            lines.append(_choice_container(tname, tdef, location, max_depth, ast))
+        elif tdef["type"] in ("SEQUENCE OF", "SET OF"):
+            # Skip -- inlined at use sites.
+            continue
         else:
-            lines.append(_typedef(tname, tdef, location, max_depth))
+            lines.append(_typedef(tname, tdef, location, max_depth, ast))
 
     lines.append("}")
     return "\n".join(lines) + "\n"
@@ -72,7 +146,7 @@ def _module_header(name: str) -> str:
 # ---------------------------------------------------------------------------
 # typedef wrapper (for non-SEQUENCE/SET top-level types)
 # ---------------------------------------------------------------------------
-def _typedef(name: str, tdef: dict, location: str, max_depth: int) -> str:
+def _typedef(name: str, tdef: dict, location: str, max_depth: int, ast: dict) -> str:
     kind, body, tail = _emit_type(tdef["type"], tdef, location, 0, max_depth)
     body = body.strip()
     if "\n" in body:
@@ -90,14 +164,18 @@ def _typedef(name: str, tdef: dict, location: str, max_depth: int) -> str:
     return f"  typedef {name} {{ type {body} }}\n"
 
 
-def _sequence_container(name: str, tdef: dict, location: str, max_depth: int) -> str:
+def _sequence_container(
+    name: str, tdef: dict, location: str, max_depth: int, ast: dict
+) -> str:
     body = rules.sequence(
-        tdef, location, depth=1, max_depth=max_depth, inner_emit=_emit_type
+        tdef, location, depth=1, max_depth=max_depth, inner_emit=_emit_type, ast=ast
     )
     return f"  container {name} {{\n{body}  }}\n"
 
 
-def _choice_container(name: str, tdef: dict, location: str, max_depth: int) -> str:
+def _choice_container(
+    name: str, tdef: dict, location: str, max_depth: int, ast: dict
+) -> str:
     """Wrap a top-level CHOICE in a container.
 
     YANG forbids `typedef` from having a `choice` sub-statement, so we
@@ -110,6 +188,7 @@ def _choice_container(name: str, tdef: dict, location: str, max_depth: int) -> s
         max_depth=max_depth,
         inner_emit=_emit_type,
         choice_name=name,
+        ast=ast,
     )
     return f"  container {name} {{\n{body}  }}\n"
 
@@ -122,7 +201,7 @@ def _choice_container(name: str, tdef: dict, location: str, max_depth: int) -> s
 # `body` is the YANG type clause (for kind=="leaf") or the indented
 # block body (for kind=="block").
 # `tail` is any closing text needed for multi-line types (e.g. '}').
-def _emit_type(asn_type, tdef, location, depth, max_depth):
+def _emit_type(asn_type, tdef, location, depth, max_depth, ast=None):
     """Dispatch one ASN.1 type to its rule. Returns (kind, body, tail).
 
     `asn_type` is the ASN.1 type name as a string.  For primitive types
@@ -130,6 +209,9 @@ def _emit_type(asn_type, tdef, location, depth, max_depth):
     a (yang_type, constraint) pair.  For composite types like SEQUENCE /
     CHOICE we call a `rules.<name>` function that returns a full YANG
     body block.
+
+    `ast` is threaded through to SEQUENCE / SEQUENCE OF / CHOICE rules
+    so that named type references in member lists can be inlined.
     """
     if asn_type == "INTEGER":
         yang, clause = rules.integer(tdef, location)
@@ -159,6 +241,31 @@ def _emit_type(asn_type, tdef, location, depth, max_depth):
         yang, clause = rules.bit_string(tdef)
         return "leaf", _combine(yang, clause), ""
 
+    # All other ASN.1 string types (UTF8String, NumericString,
+    # PrintableString, TeletexString, VisibleString, GeneralString,
+    # GraphicString, ObjectDescriptor, etc.) map to YANG's `string`.
+    # Per paper §5.3 the carrier-set intersection is a strict subset
+    # of YANG string, so a plain YANG `string` is a sound supertype.
+    if asn_type in (
+        "UTF8String",
+        "NumericString",
+        "PrintableString",
+        "TeletexString",
+        "TeletexString (SIZE (...))",
+        "VideotexString",
+        "VisibleString",
+        "GeneralString",
+        "GraphicString",
+        "ObjectDescriptor",
+        "UniversalString",
+        "BMPString",
+    ):
+        # Reuse the IA5String rule -- both end up as `string` with
+        # optional length constraint; the carrier set is a subset of
+        # YANG's UTF-8 string.
+        yang, clause = rules.ia5string(tdef)
+        return "leaf", _combine(yang, clause), ""
+
     if asn_type == "OBJECT IDENTIFIER":
         yang, clause = rules.object_identifier()
         return "leaf", _combine(yang, clause), ""
@@ -166,24 +273,28 @@ def _emit_type(asn_type, tdef, location, depth, max_depth):
     # SEQUENCE / SET (also catches inline anonymous SEQUENCE inside
     # another SEQUENCE member).
     if asn_type in ("SEQUENCE", "SET"):
-        body = rules.sequence(tdef, location, depth, max_depth, inner_emit=_emit_type)
+        body = rules.sequence(
+            tdef, location, depth, max_depth, inner_emit=_emit_type, ast=ast
+        )
         return "block", body, ""
 
     if asn_type == "SEQUENCE OF":
         body = rules.sequence_of(
-            tdef, location, depth, max_depth, inner_emit=_emit_type
+            tdef, location, depth, max_depth, inner_emit=_emit_type, ast=ast
         )
         return "block", body, ""
 
     if asn_type == "SET OF":
         # Identical to SEQUENCE OF as far as the paper's framework goes.
         body = rules.sequence_of(
-            tdef, location, depth, max_depth, inner_emit=_emit_type
+            tdef, location, depth, max_depth, inner_emit=_emit_type, ast=ast
         )
         return "block", body, ""
 
     if asn_type == "CHOICE":
-        body = rules.choice(tdef, location, depth, max_depth, inner_emit=_emit_type)
+        body = rules.choice(
+            tdef, location, depth, max_depth, inner_emit=_emit_type, ast=ast
+        )
         return "block", body, ""
 
     # Unknown ASN.1 type -> most likely a reference to another named type
@@ -227,6 +338,17 @@ _KNOWN_TYPES = {
     "SEQUENCE OF",
     "SET OF",
     "CHOICE",
+    "UTF8String",
+    "NumericString",
+    "PrintableString",
+    "TeletexString",
+    "VideotexString",
+    "VisibleString",
+    "GeneralString",
+    "GraphicString",
+    "ObjectDescriptor",
+    "UniversalString",
+    "BMPString",
     # ASN.1 SEQUENCE is intercepted upstream into _sequence_container; the
     # rules module also handles it when used inline. Keep here for completeness.
 }

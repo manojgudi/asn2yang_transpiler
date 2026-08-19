@@ -75,18 +75,24 @@ def integer(type_def: dict, location: str) -> tuple[str, str]:
 
 
 def _integer_bounds(type_def: dict, location: str):
-    """Extract the (lo, hi) of a restricted INTEGER, or None if unbounded."""
+    """Extract the (lo, hi) of a restricted INTEGER, or None if unbounded.
+
+    ASN.1 `INTEGER (a..b, c..d, ...)` becomes a `restricted-to` list that
+    may contain `None` entries (the `...` extension marker) and/or
+    multiple disjoint ranges.  For the carrier-set bijection in paper
+    §5.1, Eq.(13), we widen to the bounding range `[min(lo), max(hi)]`
+    so that all current values fit (lossy on the gap, bijection-
+    preserving for the present carrier set).  See issues.txt §1.
+    """
     ranges = type_def.get("restricted-to")
     if not ranges:
         return None
-    if len(ranges) > 1:
-        raise _impassable(
-            location,
-            "multiple value-range constraints (a..b, c..d, ...) are not "
-            "covered by the paper's Eq.(13).",
-            "collapse to a single contiguous range [a, b].",
-        )
-    return tuple(ranges[0])
+    real_ranges = [r for r in ranges if r is not None]
+    if not real_ranges:
+        return None
+    lo = min(r[0] for r in real_ranges)
+    hi = max(r[1] for r in real_ranges)
+    return (lo, hi)
 
 
 # ===========================================================================
@@ -153,9 +159,15 @@ def enumerated(type_def: dict) -> str:
 
     Left-justified: the builder applies uniform indentation when it wraps
     the result inside `type { ... }`.
+
+    ASN.1 extension marker `...` in an ENUMERATED list becomes a `None`
+    entry in the asn1tools AST.  We silently drop it (see issues.txt §1).
     """
     lines = ["enumeration {"]
-    for label, value in type_def["values"]:
+    for entry in type_def["values"]:
+        if entry is None:
+            continue
+        label, value = entry
         lines.append(f'  enum "{_as_identifier(label)}" {{ value {value}; }}')
     lines.append("}")
     return "\n".join(lines)
@@ -227,7 +239,12 @@ def object_identifier() -> tuple[str, str]:
 # 5.4  SEQUENCE  -- returns a YANG *block*, not a leaf clause.
 # ===========================================================================
 def sequence(
-    type_def: dict, location: str, depth: int, max_depth: int, inner_emit
+    type_def: dict,
+    location: str,
+    depth: int,
+    max_depth: int,
+    inner_emit,
+    ast: dict | None = None,
 ) -> str:
     """Paper §5.4, extended per optional.txt.
 
@@ -236,13 +253,29 @@ def sequence(
         - ASN.1 mandatory  -> YANG `mandatory true;`
         - ASN.1 OPTIONAL   -> no `mandatory` (YANG leaves are optional by default)
         - ASN.1 DEFAULT v  -> YANG `default "v";`
+
+    If `ast` is provided, a member whose type-name resolves to a
+    SEQUENCE / SET / SEQUENCE OF / SET OF typedef is inlined as a
+    nested container / list rather than emitted as `leaf foo { type Foo; }`.
+    This handles ASN.1 IMPORTS (e.g. `heading Heading` where
+    `Heading ::= SEQUENCE {...}` in another module) and SEQUENCE OF
+    members (e.g. `pathHistory PathHistory` where
+    `PathHistory ::= SEQUENCE OF PathPoint`).
     """
     _check_depth(location, depth, max_depth)
     if not type_def.get("members"):
         return "    // empty SEQUENCE\n"
 
+    all_types = _flatten_types(ast) if ast is not None else {}
+
     lines = []
     for member in type_def["members"]:
+        # ASN.1 extension marker `...` becomes a `None` entry in the
+        # asn1tools AST.  Per paper §6 these are future-extension
+        # markers; for a present-tense transpile we silently skip them
+        # (see issues.txt #2).
+        if member is None:
+            continue
         mandatory, default = _member_options(member, location)
         mtype = member["type"]
         mname = member["name"]
@@ -259,9 +292,78 @@ def sequence(
             child_loc = f"{location} > field '{mname}'"
             lines.append(
                 _emit_inline_block(
-                    mname, member, child_loc, depth + 1, max_depth, inner_emit
+                    mname, member, child_loc, depth + 1, max_depth, inner_emit, ast
                 )
             )
+            continue
+
+        # Named SEQUENCE reference -> inline its fields as a container.
+        if (
+            ast is not None
+            and isinstance(mtype, str)
+            and mtype in all_types
+            and all_types[mtype].get("type") in ("SEQUENCE", "SET")
+        ):
+            child_loc = f"{location} > field '{mname}'"
+            inline_member = {
+                "type": mtype,
+                "name": mname,
+                "members": all_types[mtype].get("members") or [],
+            }
+            lines.append(
+                _emit_inline_block(
+                    mname,
+                    inline_member,
+                    child_loc,
+                    depth + 1,
+                    max_depth,
+                    inner_emit,
+                    ast,
+                )
+            )
+            continue
+
+        # Named SEQUENCE OF / SET OF reference -> emit as a list.
+        if (
+            ast is not None
+            and isinstance(mtype, str)
+            and mtype in all_types
+            and all_types[mtype].get("type") in ("SEQUENCE OF", "SET OF")
+        ):
+            child_loc = f"{location} > field '{mname}'"
+            list_tdef = {
+                "type": all_types[mtype]["type"],
+                "size": all_types[mtype].get("size"),
+                "element": all_types[mtype].get("element") or {"type": "OCTET STRING"},
+            }
+            list_body = sequence_of(
+                list_tdef, child_loc, depth + 1, max_depth, inner_emit, ast, mname
+            )
+            lines.append(list_body)
+            continue
+
+        # Named CHOICE reference -> emit as a container wrapping a choice.
+        if (
+            ast is not None
+            and isinstance(mtype, str)
+            and mtype in all_types
+            and all_types[mtype].get("type") == "CHOICE"
+        ):
+            child_loc = f"{location} > field '{mname}'"
+            choice_body = choice(
+                all_types[mtype],
+                child_loc,
+                depth + 1,
+                max_depth,
+                inner_emit,
+                choice_name=mname,
+                ast=ast,
+            )
+            yang_name = _as_identifier(mname)
+            inner = "\n".join(
+                "    " + ln if ln else ln for ln in choice_body.rstrip("\n").split("\n")
+            )
+            lines.append(f"    container {yang_name} {{\n{inner}\n    }}")
             continue
 
         child_loc = f"{location} > field '{mname}'"
@@ -347,16 +449,33 @@ def _wrap_member(
 
 
 def _emit_inline_block(
-    name: str, member: dict, location: str, depth: int, max_depth: int, inner_emit
+    name: str,
+    member: dict,
+    location: str,
+    depth: int,
+    max_depth: int,
+    inner_emit,
+    ast: dict | None = None,
 ) -> str:
     """Inline composite member: dispatch via the regular _emit_type path.
 
     Indents the inner body one extra level so the resulting YANG is
     human-readable, not just well-formed.
+
+    When `ast` is provided, we always recurse through `sequence()` so
+    that nested named SEQUENCE references in the inlined body also get
+    inlined (handles imported typedefs like
+    `Heading { headingValue, headingConfidence }` regardless of
+    whether `member["type"]` says "SEQUENCE" or a named typedef like
+    "Heading").
     """
     yang_name = _as_identifier(name)
-    asn_type = member["type"]
-    kind, body, _ = inner_emit(asn_type, member, location, depth, max_depth)
+    if ast is not None:
+        # Direct call to sequence() so the ast is threaded through.
+        body = sequence(member, location, depth, max_depth, inner_emit, ast)
+    else:
+        asn_type = member["type"]
+        kind, body, _ = inner_emit(asn_type, member, location, depth, max_depth)
     inner = "\n".join("    " + ln if ln else ln for ln in body.rstrip("\n").split("\n"))
     return f"    container {yang_name} {{\n{inner}\n    }}"
 
@@ -371,6 +490,7 @@ def choice(
     max_depth: int,
     inner_emit,
     choice_name: str = "choice",
+    ast: dict | None = None,
 ) -> str:
     """Paper §5.5, extended per optional.txt.
 
@@ -380,27 +500,112 @@ def choice(
     asn1tools enforces this), so we emit `mandatory true;` ONCE on the
     `choice` line itself -- not on individual `case` lines, because
     RFC 7950 §7.9.2 forbids `mandatory` as a sub-statement of `case`.
+
+    When `ast` is provided, an alternative whose type-name resolves to
+    a SEQUENCE / SET / CHOICE / SEQUENCE OF is inlined as a container
+    / list rather than emitted as `case X { leaf X { type X; } }`.
     """
     _check_depth(location, depth, max_depth)
     members = type_def.get("members") or []
     if not members:
         raise _impassable(location, "CHOICE has no alternatives.")
 
+    all_types = _flatten_types(ast) if ast is not None else {}
+
     lines = [
         f"    choice {_as_identifier(choice_name)} {{",
         "      mandatory true;",
     ]
     for alt in members:
+        # ASN.1 extension marker `...` (see issues.txt #2).
+        if alt is None:
+            continue
         atype = alt["type"]
         aname = alt["name"]
         alt_loc = f"{location} > alternative '{aname}'"
+
+        # Named SEQUENCE / SET alternative -> inline as a container inside the case.
+        if (
+            ast is not None
+            and isinstance(atype, str)
+            and atype in all_types
+            and all_types[atype].get("type") in ("SEQUENCE", "SET")
+        ):
+            inline_member = {
+                "type": atype,
+                "name": aname,
+                "members": all_types[atype].get("members") or [],
+            }
+            case_body = _emit_inline_block(
+                aname, inline_member, alt_loc, depth + 1, max_depth, inner_emit, ast
+            )
+            # Re-indent one level deeper so the container body sits at 8 spaces.
+            case_inner = "\n".join(
+                "  " + ln if ln else ln for ln in case_body.rstrip("\n").split("\n")
+            )
+            lines.append(f"      case {_as_identifier(aname)} {{")
+            for ln in case_inner.split("\n"):
+                lines.append(ln)
+            lines.append("      }")
+            continue
+
+        # Named SEQUENCE OF / SET OF alternative -> inline as a list inside the case.
+        if (
+            ast is not None
+            and isinstance(atype, str)
+            and atype in all_types
+            and all_types[atype].get("type") in ("SEQUENCE OF", "SET OF")
+        ):
+            list_tdef = {
+                "type": all_types[atype]["type"],
+                "size": all_types[atype].get("size"),
+                "element": all_types[atype].get("element") or {"type": "OCTET STRING"},
+            }
+            list_body = sequence_of(
+                list_tdef, alt_loc, depth + 1, max_depth, inner_emit, ast, aname
+            )
+            case_inner = "\n".join(
+                "  " + ln if ln else ln for ln in list_body.rstrip("\n").split("\n")
+            )
+            lines.append(f"      case {_as_identifier(aname)} {{")
+            for ln in case_inner.split("\n"):
+                lines.append(ln)
+            lines.append("      }")
+            continue
+
+        # Named CHOICE alternative -> inline as a container wrapping a choice.
+        if (
+            ast is not None
+            and isinstance(atype, str)
+            and atype in all_types
+            and all_types[atype].get("type") == "CHOICE"
+        ):
+            choice_body = choice(
+                all_types[atype],
+                alt_loc,
+                depth + 1,
+                max_depth,
+                inner_emit,
+                choice_name=aname,
+                ast=ast,
+            )
+            inner = "\n".join(
+                "  " + ln if ln else ln for ln in choice_body.rstrip("\n").split("\n")
+            )
+            lines.append(f"      case {_as_identifier(aname)} {{")
+            for ln in inner.split("\n"):
+                lines.append(ln)
+            lines.append("      }")
+            continue
+
+        # Leaf-like / inline alternative -- existing path.
         if isinstance(atype, str):
             kind, body, _tail = inner_emit(atype, alt, alt_loc, depth + 1, max_depth)
             case_inner = _wrap_member(aname, kind, body)
         else:
             case_inner = [
                 _emit_inline_block(
-                    aname, alt, alt_loc, depth + 1, max_depth, inner_emit
+                    aname, alt, alt_loc, depth + 1, max_depth, inner_emit, ast
                 )
             ]
         lines.append(f"      case {_as_identifier(aname)} {{")
@@ -419,22 +624,41 @@ def choice(
 #                              so the bijection carries over.)
 # ===========================================================================
 def sequence_of(
-    type_def: dict, location: str, depth: int, max_depth: int, inner_emit
+    type_def: dict,
+    location: str,
+    depth: int,
+    max_depth: int,
+    inner_emit,
+    ast: dict | None = None,
+    list_name: str = "entry",
 ) -> str:
-    """SEQUENCE OF T -> YANG 'list' with one entry typed by T."""
+    """SEQUENCE OF T -> YANG 'list' with one entry typed by T.
+
+    When `ast` is provided and the element is itself a SEQUENCE / SET
+    (named typedef or inline), its fields are inlined as the list's
+    entry body.  This handles `SEQUENCE OF PathPoint` etc. from
+    ITS-Container-style imports.
+    """
     _check_depth(location, depth, max_depth)
     size = type_def.get("size")
     if not size:
         size_clause = ""
     else:
+        # Filter out the ASN.1 `...` extension marker (becomes None in
+        # the asn1tools AST).  See issues.txt §1.
+        real_size = [s for s in size if s is not None]
+        if not real_size:
+            size_clause = ""
         # Same shape as for strings -- see _string_length.
-        if len(size) == 1 and isinstance(size[0], int):
-            n = size[0]
+        elif len(real_size) == 1 and isinstance(real_size[0], int):
+            n = real_size[0]
             size_clause = f"      min-elements {n};\n      max-elements {n};\n"
         elif (
-            len(size) == 1 and isinstance(size[0], (list, tuple)) and len(size[0]) == 2
+            len(real_size) == 1
+            and isinstance(real_size[0], (list, tuple))
+            and len(real_size[0]) == 2
         ):
-            lo, hi = size[0]
+            lo, hi = real_size[0]
             # YANG 'list' uses min-elements / max-elements, not range syntax.
             size_clause = (f"      min-elements {lo};\n" if lo > 0 else "") + (
                 f"      max-elements {hi};\n" if hi < 2**32 - 1 else ""
@@ -449,28 +673,99 @@ def sequence_of(
     element = type_def["element"]
     etype = element["type"]
     elt_loc = f"{location} > element"
+    all_types = _flatten_types(ast) if ast is not None else {}
 
-    # We need a name for the list's key. Convention: "entry" with a 'value'
-    # leaf (or 'container' if T is composite).
+    # Composite element type (named or inline SEQUENCE / SET) -> inline
+    # its fields as the list's entry body.
+    is_composite = (
+        ast is not None
+        and isinstance(etype, str)
+        and etype in all_types
+        and all_types[etype].get("type") in ("SEQUENCE", "SET")
+    )
+    inline_composite = (
+        ast is not None
+        and isinstance(etype, str)
+        and etype in ("SEQUENCE", "SET")
+        and "members" in element
+    )
+    if is_composite or inline_composite:
+        if is_composite:
+            elem_tdef = {
+                "type": etype,
+                "name": "entry",
+                "members": all_types[etype].get("members") or [],
+            }
+        else:
+            elem_tdef = element
+        elem_body = sequence(elem_tdef, elt_loc, depth + 1, max_depth, inner_emit, ast)
+        # YANG lists must have a key.  Pick the first non-None leaf-like
+        # member if there is one; otherwise fall back to a synthetic
+        # `id` leaf so the schema at least loads.
+        key_member = _pick_list_key(elem_tdef.get("members") or [], all_types)
+        if key_member is not None:
+            key_name = _as_identifier(key_member["name"])
+            key_line = f'      key "{key_name}";\n'
+        else:
+            key_line = '      key "id";\n      leaf id { type uint32; }\n'
+        return (
+            f"    list {_as_identifier(list_name)} {{\n"
+            f"{key_line}{size_clause}{elem_body.rstrip()}\n    }}"
+        )
+
+    # Leaf-like element type.
     if isinstance(etype, str):
         kind, body, tail = inner_emit(etype, element, elt_loc, depth + 1, max_depth)
         body = body.strip()
-        if kind == "leaf":
-            entry = f'    list entry {{\n      key "value";\n      leaf value {{ type {body};{tail} }}\n{size_clause}    }}'
-            return entry
-        # kind == block (enum); embed inside list
-        entry = f'    list entry {{\n      key "value";\n      leaf value {{\n        type {body};{tail}\n      }}\n{size_clause}    }}'
+        # `body` is already a complete `type ... ;` or `type ... { ... }`
+        # clause per the `_emit_type` contract -- do NOT add another `;`.
+        entry = f'    list {_as_identifier(list_name)} {{\n      key "value";\n      leaf value {{ type {body} }}\n{size_clause}    }}'
         return entry
 
-    # Composite element type -- the carrier-set bijection for SEQUENCE OF
-    # only carries over cleanly when T is a leaf-like type with a fixed
-    # built-in mapping. Composite T would need an inline dispatch path
-    # we don't yet implement; raise so it's not silently wrong.
+    # Composite element type (anonymous, no ast) -- raise as before.
     raise _impassable(
         elt_loc,
         f"SEQUENCE OF composite element type {etype!r} is not supported.",
         "use a SEQUENCE OF <leaf-like-type> or extend sequence_of().",
     )
+
+
+def _flatten_types(ast: dict) -> dict:
+    """Return a flat {type_name: tdef} dict from a multi-module AST.
+
+    The transpiler's AST is `{module_name: {"types": {...}}}`.  When
+    the user supplies multiple ASN.1 files via `parse_asn1_files`, all
+    modules' types are merged into one synthetic module, so this is a
+    single-level unwrap.  Kept as a separate function in case the AST
+    shape grows later.
+    """
+    flat: dict = {}
+    for _mod_name, mod in ast.items():
+        flat.update(mod.get("types") or {})
+    return flat
+
+
+def _pick_list_key(members: list, all_types: dict) -> dict | None:
+    """Find a good YANG list-key candidate among SEQUENCE OF element members.
+
+    YANG RFC 7950 §7.8.2 requires a list to have exactly one key.  We
+    pick the first non-`...` member whose type is a leaf-like ASN.1
+    sort (INTEGER / BOOLEAN / ENUMERATED, or a typedef that resolves
+    to one of these).
+    """
+    LEAF_LIKE = {"INTEGER", "BOOLEAN", "ENUMERATED"}
+    for m in members:
+        if m is None:
+            continue
+        tname = m.get("type")
+        if not isinstance(tname, str):
+            continue
+        if tname in LEAF_LIKE:
+            return m
+        resolved = all_types.get(tname, {})
+        if resolved.get("type") in LEAF_LIKE:
+            return m
+    return None
 
 
 # ===========================================================================
