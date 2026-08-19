@@ -1,0 +1,77 @@
+
+{
+  "header": {
+    "messageID": 2,
+    "protocolVersion": 2,
+    "stationID": 1273
+  },
+  "cam": {
+    "generationDeltaTime": 39054,
+    "camParameters": {
+      "basicContainer": {
+        "referencePosition": {
+          "altitude": {
+            "altitudeValue": 300,
+            "altitudeConfidence": "outOfRange"
+          },
+          "positionConfidenceEllipse": {
+            "semiMajorOrientation": 0,
+            "semiMinorConfidence": 1,
+            "semiMajorConfidence": 1
+          },
+          "latitude": 481274024,
+          "longitude": -16277766
+        },
+        "stationType": 5
+      },
+      "highFrequencyContainer": {
+        "basicVehicleContainerHighFrequency": {
+          "vehicleLength": {
+            "vehicleLengthValue": 1023,
+            "vehicleLengthConfidenceIndication": "unavailable"
+          },
+          "accelerationControl": "00",
+          "vehicleWidth": 61,
+          "yawRate": {
+            "yawRateValue": 32767,
+            "yawRateConfidence": "unavailable"
+          },
+          "heading": {
+            "headingValue": 2492,
+            "headingConfidence": 1
+          },
+          "curvatureCalculationMode": "unavailable",
+          "longitudinalAcceleration": {
+            "longitudinalAccelerationValue": 161,
+            "longitudinalAccelerationConfidence": 102
+          },
+          "driveDirection": "unavailable",
+          "speed": {
+            "speedValue": 140,
+            "speedConfidence": 1
+          },
+          "curvature": {
+            "curvatureConfidence": "unavailable",
+            "curvatureValue": 1023
+          }
+        }
+      },
+      "lowFrequencyContainer": {
+        "basicVehicleContainerLowFrequency": {
+          "vehicleRole": "default",
+          "exteriorLights": "00",
+          "pathHistory": [
+            {
+              "pathPosition": {
+                "deltaAltitude": 12800,
+                "deltaLongitude": 0,
+                "deltaLatitude": 0
+              },
+              "pathDeltaTime": 497330
+            }
+          ]
+        }
+      }
+    }
+  }
+}   

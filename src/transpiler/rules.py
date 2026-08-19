@@ -194,9 +194,29 @@ def octet_string(type_def: dict) -> tuple[str, str]:
 
 
 def bit_string(type_def: dict) -> tuple[str, str]:
-    """BIT STRING -> YANG binary (the paper notes this is straightforward)."""
-    length = _string_length(type_def)
-    return "binary", f' length "{length}"' if length else ""
+    """BIT STRING -> YANG binary (the paper notes this is straightforward).
+
+    ASN.1 BIT STRING SIZE(N) is in *bits*; YANG `binary` length is in
+    *octets*.  Convert via `ceil(N / 8)` so `SIZE(7)` becomes 1 octet
+    (7 bits padded to one byte, per JER), which is what `base64`
+    encodes to.  Without this conversion, libyang sees a 1-byte
+    base64 value against a `length "7"` constraint and rejects it.
+    """
+    raw_length = _string_length(type_def)
+    if not raw_length:
+        return "binary", ""
+    try:
+        # `_string_length` returns either "N" or "lo..hi".
+        if ".." in raw_length:
+            lo_s, hi_s = raw_length.split("..")
+            lo, hi = int(lo_s), int(hi_s)
+            octet_clause = f' length "{(lo + 7) // 8}..{(hi + 7) // 8}"'
+        else:
+            n = int(raw_length)
+            octet_clause = f' length "{(n + 7) // 8}"'
+    except ValueError:
+        octet_clause = f' length "{raw_length}"'
+    return "binary", octet_clause
 
 
 def _string_length(type_def: dict) -> str:
@@ -309,6 +329,7 @@ def sequence(
                 "type": mtype,
                 "name": mname,
                 "members": all_types[mtype].get("members") or [],
+                "optional": bool(member.get("optional")),
             }
             lines.append(
                 _emit_inline_block(
@@ -319,6 +340,7 @@ def sequence(
                     max_depth,
                     inner_emit,
                     ast,
+                    presence=bool(member.get("optional")),
                 )
             )
             continue
@@ -339,7 +361,21 @@ def sequence(
             list_body = sequence_of(
                 list_tdef, child_loc, depth + 1, max_depth, inner_emit, ast, mname
             )
-            lines.append(list_body)
+            if member.get("optional"):
+                yang_name = _as_identifier(mname)
+                indented = "\n".join(
+                    "    " + ln if ln else ln
+                    for ln in list_body.rstrip("\n").split("\n")
+                )
+                # YANG lists don't support `presence`; wrap the list
+                # in an OPTIONAL container with `presence` instead.
+                lines.append(
+                    f"    container {yang_name} {{\n"
+                    f'      presence "{yang_name.replace("-", " ")} is present";\n'
+                    f"{indented}\n    }}"
+                )
+            else:
+                lines.append(list_body)
             continue
 
         # Named CHOICE reference -> emit as a container wrapping a choice.
@@ -363,7 +399,14 @@ def sequence(
             inner = "\n".join(
                 "    " + ln if ln else ln for ln in choice_body.rstrip("\n").split("\n")
             )
-            lines.append(f"    container {yang_name} {{\n{inner}\n    }}")
+            if member.get("optional"):
+                lines.append(
+                    f"    container {yang_name} {{\n"
+                    f'      presence "{yang_name.replace("-", " ")} is present";\n'
+                    f"{inner}\n    }}"
+                )
+            else:
+                lines.append(f"    container {yang_name} {{\n{inner}\n    }}")
             continue
 
         child_loc = f"{location} > field '{mname}'"
@@ -456,6 +499,7 @@ def _emit_inline_block(
     max_depth: int,
     inner_emit,
     ast: dict | None = None,
+    presence: bool = False,
 ) -> str:
     """Inline composite member: dispatch via the regular _emit_type path.
 
@@ -468,6 +512,10 @@ def _emit_inline_block(
     `Heading { headingValue, headingConfidence }` regardless of
     whether `member["type"]` says "SEQUENCE" or a named typedef like
     "Heading").
+
+    When `presence=True`, the inlined container is emitted as a YANG
+    `presence` container, which makes the whole sub-tree optional
+    rather than mandatory.  Used for ASN.1 OPTIONAL SEQUENCE members.
     """
     yang_name = _as_identifier(name)
     if ast is not None:
@@ -476,8 +524,30 @@ def _emit_inline_block(
     else:
         asn_type = member["type"]
         kind, body, _ = inner_emit(asn_type, member, location, depth, max_depth)
-    inner = "\n".join("    " + ln if ln else ln for ln in body.rstrip("\n").split("\n"))
+    inner = _indent_block(body.rstrip("\n").split("\n"))
+    if presence:
+        return _wrap_with_presence(yang_name, inner)
     return f"    container {yang_name} {{\n{inner}\n    }}"
+
+
+def _indent_block(lines: list[str]) -> str:
+    """Indent a list of body lines by 4 spaces, preserving blank lines."""
+    return "\n".join("    " + ln if ln else ln for ln in lines)
+
+
+def _wrap_with_presence(name: str, content: str) -> str:
+    """Wrap `content` in a `container name { presence ...; content }`.
+
+    Used for OPTIONAL inlined SEQUENCE / SET / CHOICE members: ASN.1
+    OPTIONAL maps cleanly to a YANG `presence` container.  SEQUENCE OF
+    cannot have `presence` directly (lists don't support it), so the
+    caller wraps the list in a fresh container and applies this helper.
+    """
+    return (
+        f"    container {name} {{\n"
+        f'      presence "{name.replace("-", " ")} is present";\n'
+        f"{content}\n    }}"
+    )
 
 
 # ===========================================================================

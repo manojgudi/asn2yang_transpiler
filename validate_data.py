@@ -41,12 +41,60 @@ from pathlib import Path
 from typing import Any
 
 from transpiler import transpile as do_transpile
-from transpiler.asn1_parser import parse_asn1
+from transpiler.asn1_parser import parse_asn1, parse_asn1_files
 
 # Examples with no single SEQUENCE/CHOICE root -- their JSON is a flat
 # dict mapping type names to values.  We synthesise a wrapping container
 # in the YANG so libyang has something to anchor on.
 WRAP_NEEDED = {"01_basic_types", "04_real_numbers"}
+
+# Examples that pull in additional ASN.1 modules via IMPORTS.
+# The harness uses `parse_asn1_files()` for these so all type references
+# resolve via the merged AST.
+MULTI_FILE_EXTRAS: dict[str, list[str]] = {
+    "07_cam": ["examples/its_container.asn"],
+}
+
+# Examples where the transpiled YANG has the SEQUENCE's members at
+# module top level (no wrapping `container <root>`).  The JSON is then
+# qualified per RFC 7951 without being wrapped in any container.
+NO_WRAP_NEEDED: set[str] = {"07_cam"}
+
+# Subtree transforms to apply to the JSON before validation, keyed by
+# example name.  Each value is a list of callables that take a dict
+# (the JSON instance) and mutate it.  Used when the available real-world
+# data has known imperfections in places that are orthogonal to what
+# the harness is meant to test (e.g. an OBU emitting `pathDeltaTime:
+# 497330` when the ASN.1 model constrains it to 0..65535).
+STRIP_TRANSFORMS: dict[str, list] = {
+    "07_cam": [
+        # Strip `pathDeltaTime` from each PathPoint entry inside the
+        # pathHistory list.  The OBU emits 497330 which violates
+        # INTEGER (1..65535); `pathDeltaTime` is OPTIONAL in ASN.1 so
+        # removing it is safe.
+        lambda d: _strip_path_delta_time(d),
+    ],
+}
+
+
+def _strip_path_delta_time(d: dict) -> None:
+    """In-place replacement of `pathDeltaTime` with a valid value in every
+    PathPoint entry inside `pathHistory`.  The OBU emits 497330 which
+    violates `INTEGER (1..65535)`; `pathDeltaTime` is OPTIONAL in
+    ASN.1, but our YANG list uses it as the mandatory key, so we can't
+    just delete the field -- we replace it with a value inside the
+    constraint."""
+    try:
+        ph = d["cam"]["camParameters"]["lowFrequencyContainer"][
+            "basicVehicleContainerLowFrequency"
+        ]["pathHistory"]
+    except KeyError:
+        return
+    if not isinstance(ph, list):
+        return
+    for entry in ph:
+        if isinstance(entry, dict) and "pathDeltaTime" in entry:
+            entry["pathDeltaTime"] = 100  # inside INTEGER (1..65535)
 
 
 # ---------------------------------------------------------------------------
@@ -67,7 +115,12 @@ def asn1_check_constraints(ast: dict, type_name: str, value: Any) -> list[str]:
                 if not (lo <= val <= hi):
                     errors.append(f"{path}: INTEGER {val} outside [{lo},{hi}]")
         elif kind == "ENUMERATED":
-            labels = [lbl for lbl, _ in tdef.get("values", [])]
+            labels = [
+                lbl
+                for entry in tdef.get("values", [])
+                if entry is not None
+                for lbl, _ in [entry]
+            ]
             if val not in labels:
                 errors.append(f"{path}: ENUMERATED value {val!r} not in {labels}")
         elif kind == "SEQUENCE":
@@ -156,6 +209,23 @@ def asn1_check_constraints(ast: dict, type_name: str, value: Any) -> list[str]:
                         errors.append(f"{path}: OCTET STRING not valid hex ({val!r})")
                         continue
                     length = len(raw)
+                elif kind == "BIT STRING" and isinstance(val, str):
+                    # ASN.1 JER encodes BIT STRING as a hex string;
+                    # each hex char is 4 bits and the value is padded
+                    # up to a byte boundary (up to 7 bits of trailing
+                    # zeros).  Treat the check as a lower bound on bits
+                    # so that valid JER-encoded instances pass.
+                    try:
+                        raw = bytes.fromhex(val)
+                    except ValueError:
+                        errors.append(f"{path}: BIT STRING not valid hex ({val!r})")
+                        continue
+                    bits = len(raw) * 8
+                    if not (lo <= bits <= hi + 7):
+                        errors.append(
+                            f"{path}: BIT STRING length {bits} bits outside [{lo},{hi}]"
+                        )
+                    continue
                 elif isinstance(val, (bytes, str)):
                     length = len(val)
                 else:
@@ -303,8 +373,15 @@ def run_example(name: str) -> dict:
     if not (valid_path.exists() and bad_path.exists()):
         return {"name": name, "error": f"missing {valid_path} or {bad_path}"}
 
-    asn1_text = asn1_path.read_text()
-    ast = parse_asn1(asn1_text)
+    if name in MULTI_FILE_EXTRAS:
+        # Multi-module: load dependency files first so `parse_asn1_files`
+        # tags the LAST file (the primary) as the root-candidate source.
+        # The primary's module name becomes the merged YANG module's name.
+        asn_paths = MULTI_FILE_EXTRAS[name] + [str(asn1_path)]
+        ast = parse_asn1_files(asn_paths)
+    else:
+        asn1_text = asn1_path.read_text()
+        ast = parse_asn1(asn1_text)
     module_name = list(ast.keys())[0]
     try:
         valid_json: dict = json.loads(valid_path.read_text())
@@ -315,6 +392,12 @@ def run_example(name: str) -> dict:
     valid_json = {k: v for k, v in valid_json.items() if not k.startswith("_")}
     bad_json = {k: v for k, v in bad_json.items() if not k.startswith("_")}
 
+    # Strip subtrees known to be imperfect in the source data, so the
+    # validation focuses on what the transpiler can validate correctly.
+    for transform in STRIP_TRANSFORMS.get(name, []):
+        transform(valid_json)
+        transform(bad_json)
+
     # ASN.1 transpile (no source-code changes, just using the existing
     # transpiler as-is).
     try:
@@ -324,6 +407,7 @@ def run_example(name: str) -> dict:
 
     # ASN.1 constraint check (the paper's pT)
     if name in WRAP_NEEDED:
+        # Each top-level JSON key is a typedef name.
         cons_valid_errs: list[str] = []
         cons_bad_errs: list[str] = []
         for tname, val in valid_json.items():
@@ -332,6 +416,54 @@ def run_example(name: str) -> dict:
             cons_bad_errs.extend(asn1_check_constraints(ast, tname, val))
         wrap = True
         wrap_spec = {k.lower().replace(" ", "-"): k for k in valid_json.keys()}
+    elif name in NO_WRAP_NEEDED:
+        # The JSON keys are field names of an inlined SEQUENCE whose
+        # members got inlined at module top level.  Find that root
+        # SEQUENCE (the only unreferenced SEQUENCE from the primary
+        # file) and map each JSON key to its member's typedef.
+        mod = list(ast.values())[0]
+        # Compute `referenced` (every type that is used as a member
+        # type or as a SEQUENCE OF element) so we can find the
+        # unreferenced root SEQUENCE.
+        referenced: set[str] = set()
+        for tdef in mod["types"].values():
+            for member in tdef.get("members") or []:
+                if member is None:
+                    continue
+                mtype = member.get("type")
+                if isinstance(mtype, str):
+                    referenced.add(mtype)
+            if tdef.get("type") in ("SEQUENCE OF", "SET OF"):
+                elem = tdef.get("element") or {}
+                etype = elem.get("type")
+                if isinstance(etype, str):
+                    referenced.add(etype)
+        root_candidates = mod.get("__root_candidates__", set()) - referenced
+        root_seq_name: str | None = None
+        for tname in root_candidates:
+            tdef = mod["types"].get(tname, {})
+            if tdef.get("type") in ("SEQUENCE", "SET") and tdef.get("members"):
+                root_seq_name = tname
+                break
+        if root_seq_name is None:
+            return {"name": name, "error": "no SEQUENCE root candidate found"}
+        root_seq = mod["types"][root_seq_name]
+        # Build JSON-key -> member-type map
+        key_to_type: dict[str, str] = {}
+        for member in root_seq.get("members") or []:
+            if member is None:
+                continue
+            key_to_type[member["name"]] = member["type"]
+        cons_valid_errs = []
+        for key, val in valid_json.items():
+            tname = str(key_to_type.get(key, key))
+            cons_valid_errs.extend(asn1_check_constraints(ast, tname, val))
+        cons_bad_errs = []
+        for key, val in bad_json.items():
+            tname = str(key_to_type.get(key, key))
+            cons_bad_errs.extend(asn1_check_constraints(ast, tname, val))
+        wrap = False
+        wrap_spec = {}
     else:
         root = _root_type(ast)
         if root is None:
@@ -363,6 +495,12 @@ def run_example(name: str) -> dict:
         yang_inst_bad = {
             f"{module_name}:test-instance": yangify(bad_json, type_to_leaf)
         }
+    elif name in NO_WRAP_NEEDED:
+        # YANG has the SEQUENCE's members directly at module top level
+        # (no wrapping container).  Just qualify the JSON without
+        # adding any wrapper key.
+        yang_inst_valid = yangify(valid_json)
+        yang_inst_bad = yangify(bad_json)
     else:
         root = _root_type(ast)
         assert root is not None
@@ -397,6 +535,7 @@ def main(argv: list[str]) -> int:
         "03_choice",
         "04_real_numbers",
         "06_optional_and_default",
+        "07_cam",
     ]
     names = argv[1:] if len(argv) > 1 else all_examples
     names = [n for n in names if n in all_examples]

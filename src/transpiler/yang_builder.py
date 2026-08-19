@@ -82,9 +82,13 @@ def transpile(ast: dict, max_depth: int = DEFAULT_MAX_DEPTH) -> str:
                 # file.  Orphan types from imported modules are
                 # skipped, otherwise libyang complains about their
                 # mandatory fields being missing from the JSON.
-                root_candidates = set()
+                root_candidates: set[str] = set()
                 for mod in ast.values():
-                    root_candidates |= mod.get("__root_candidates__", set())
+                    # __root_candidates__ contains ALL types from the
+                    # last file; subtract referenced ones to get the
+                    # actual root candidates.
+                    rc = mod.get("__root_candidates__", set())
+                    root_candidates |= rc - referenced
                 if tname not in root_candidates:
                     continue
                 # The PRIMARY root SEQUENCE is emitted WITHOUT a
