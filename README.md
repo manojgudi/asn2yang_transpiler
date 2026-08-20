@@ -1,6 +1,6 @@
 # asn1-to-yang-transpiler
 
-A toy ASN.1 → YANG transpiler that implements the rules from the
+A prototype ASN.1 → YANG transpiler that implements the rules from the
 research paper:
 
 > *Preserving Semantics for Transpilation of Data Modelling Languages
@@ -271,5 +271,5 @@ the offending location.
 
 ## License & scope
 
-This is a **toy** transpiler built to study the paper. The code was implemented with assistance from a large language model.
+This is a **prototype** transpiler built to study the paper. The code was implemented with assistance from a large language model.
 Distributed under MIT LICENSE.
