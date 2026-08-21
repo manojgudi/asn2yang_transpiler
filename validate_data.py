@@ -1,26 +1,34 @@
 #!/usr/bin/env python3
 """
-validate_data.py -- validate JSON data files against ASN.1 model and
-the corresponding transpiled YANG model.
+validate_data.py -- data-instance sanity checks for the prototype
+transpiler (TP).  Implements paper §5.6: *"if J conforms to model MA,
+then it also conforms to model MY. Conversely, if J does not conform to
+MA, then it also fails to conform to MY."*
 
 Inputs:
-    examples/data/data_NN.json        -- instance expected to satisfy ASN.1
-    examples/data/data_NN_bad.json    -- instance expected to be rejected
+    examples/data/data_NN.json        -- data instance J, expected to
+                                        conform to both ASN.1 model MA
+                                        and the transpiled YANG model MY
+    examples/data/data_NN_bad.json    -- bad instance J, expected to fail
+                                        both linters
 
 For each pair (valid, bad) the script:
-    1. Transpiles examples/NN.asn to YANG using `transpiler.transpile`.
-       (We do NOT modify the transpiler source -- this is purely empirical
-       validation of the *output* of the transpiler.)
-    2. Validates the JSON against the ASN.1 model using an *independent*
-       constraint checker (range, enumeration membership, size, choice
-       alternative).
-    3. Validates the JSON against the transpiled YANG using `yanglint`
-       (libyang).
-    4. Reports ASN.1 cons valid_ok / bad_caught and YANG valid_acc / bad_rej.
+    1. Transpiles examples/NN.asn to YANG using `transpiler.transpile`
+       (the prototype transpiler TP, paper §5.6).  We do NOT modify the
+       transpiler source -- this is purely empirical validation of TP's
+       output.
+    2. Validates J against MA using an independent constraint checker
+       (range, enumeration membership, size, choice alternative) -- the
+       ASN.1 linter LA side of the sanity test.
+    3. Validates J against MY using `yanglint` (libyang) -- the YANG
+       linter LY side.
+    4. Reports the four sanity-check columns: ASN.1 cons valid / bad and
+       YANG valid acc / bad rej.
 
-These four checks are consistency sanity tests: a valid instance must be
-accepted by both validators and a bad instance must be rejected by both.
-They are not a proof of semantic preservation.
+These are **consistency sanity checks** for TP on real-world data.
+They are not a proof of semantic preservation -- the proof of the
+transpilation morphism TΦ,β rests on the CafeOBJ proof scores in §5,
+not on these JSON tests.
 
 Usage:
     python3 validate_data.py                 # all examples
@@ -578,17 +586,14 @@ def main(argv: list[str]) -> int:
 
     print()
     print("Legend:")
-    print(
-        "  ASN.1 cons valid : independent ASN.1 constraint check accepts data_NN.json"
-    )
-    print(
-        "  ASN.1 cons bad   : independent ASN.1 constraint check rejects data_NN_bad.json"
-    )
-    print("  YANG valid acc   : libyang (yanglint) accepts data_NN.json")
-    print("  YANG bad rej     : libyang (yanglint) rejects data_NN_bad.json")
+    print("  ASN.1 cons valid : ASN.1 linter LA (asn1tools-style check) accepts J")
+    print("  ASN.1 cons bad   : ASN.1 linter LA rejects the bad instance")
+    print("  YANG valid acc   : YANG linter LY (libyang's yanglint) accepts J")
+    print("  YANG bad rej     : YANG linter LY rejects the bad instance")
     print()
-    print("These are consistency sanity checks between the ASN.1 model and the")
-    print("transpiled YANG model -- not a proof of semantic preservation.")
+    print("These are consistency sanity checks for the prototype transpiler")
+    print("TP on real-world data (paper §5.6) -- not a proof of semantic")
+    print("preservation, which rests on the CafeOBJ proof scores in §5.")
     return 0 if overall else 1
 
 

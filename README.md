@@ -7,9 +7,10 @@ research paper:
 > using CafeOBJ* — **Section 5** (Integer / Real / String / Record /
 > Choice rules).
 
-It parses an ASN.1 module with [`asn1tools`][asn1tools] (industry-standard),
-walks the AST, applies one small rule per ASN.1 type, and emits YANG that
-is validated by [`pyang`][pyang] (the IETF-recommended YANG validator).
+It parses an ASN.1 module with [`asn1tools`][asn1tools] (the ASN.1 linter
+**LA** in the paper's notation), walks the AST, applies one small rule
+per ASN.1 type, and emits YANG that is validated by [`pyang`][pyang]
+(the YANG linter **LY**).
 
 [asn1tools]: https://github.com/eerimoq/asn1tools
 [pyang]:     https://github.com/mbj4668/pyang
@@ -43,7 +44,7 @@ This puts three ways to invoke the transpiler on your `$PATH`:
 * `asn1-to-yang …`
 * `python asn1_to_yang.py ..`
 
-### Sanity check
+### Sanity checks
 
 ```bash
 # Should print a YANG module header and a list of typedefs.
@@ -136,24 +137,30 @@ ast = parse_asn1(open("examples/01_basic_types.asn").read())
 yang_text = transpile(ast)
 ```
 
-### 2. Test JSON instances against both ASN.1 and YANG models
+### 2. Sanity checks for TP
 
-For each working example, `examples/data/` ships a pair of JSON files:
+Per paper §5.6: *"if J conforms to model MA, then it also conforms to
+model MY. Conversely, if J does not conform to MA, then it also fails
+to conform to MY."*  Our four-column test harness operationalises that
+invariant.
 
-* `data_NN.json`     — an instance expected to satisfy **both** the
-  ASN.1 model and the transpiled YANG.
-* `data_NN_bad.json` — an instance that violates exactly one constraint
-  (range, enumeration membership, size, choice alternative), expected to
-  be rejected by **both** validators.
+The data instance **J** in `examples/data/data_07.json` is a real CAM
+message emitted by the YoGoKo commercial V2X OBU [35] (paper §5.6).
+For each working example, `examples/data/` ships a pair of instances:
+
+* `data_NN.json`     — instance **J** expected to conform to **both** the
+  ASN.1 model **MA** and the transpiled YANG model **MY**.
+* `data_NN_bad.json` — instance **J** that violates exactly one
+  constraint, expected to fail both linters.
 
 The harness `validate_data.py` runs four checks per example:
 
 | Column | What it tests |
 | --- | --- |
-| `ASN.1 cons valid` | independent ASN.1 constraint check accepts `data_NN.json` |
-| `ASN.1 cons bad` | independent ASN.1 constraint check rejects `data_NN_bad.json` |
-| `YANG valid acc` | libyang's `yanglint` accepts `data_NN.json` |
-| `YANG bad rej` | libyang's `yanglint` rejects `data_NN_bad.json` |
+| `ASN.1 cons valid` | ASN.1 linter **LA** (asn1tools-style constraint check) accepts J |
+| `ASN.1 cons bad` | ASN.1 linter **LA** rejects the bad instance |
+| `YANG valid acc` | YANG linter **LY** (libyang's `yanglint`) accepts J |
+| `YANG bad rej` | YANG linter **LY** rejects the bad instance |
 
 Run it:
 
@@ -180,13 +187,12 @@ example                      ASN.1 cons valid   ASN.1 cons bad  YANG valid acc  
 06_optional_and_default                     Y                Y               Y             Y
 ```
 
-These are **consistency sanity checks**: a valid instance is accepted by
-both validators and a bad instance is rejected by both. They are not a
-proof of semantic preservation -- the proof of the institution morphism
-in the paper rests on the CafeOBJ proof scores in §5, not on these
-JSON tests.
+These are **consistency sanity checks** for the transpiler prototype TP
+on real-world data. They are not a proof of semantic preservation -- the
+proof of the transpilation morphism TΦ,β rests on the CafeOBJ proof
+scores in §5, not on these JSON tests.
 
-#### Sanity-checking the harness
+#### Sanity-checking the linters
 
 The harness is not just rubber-stamping — try breaking it on purpose:
 
@@ -204,7 +210,6 @@ python3 validate_data.py 01
 # Restore the fixtures (git) before committing:
 git checkout -- examples/data/
 ```
-
 
 ## What it supports (per the paper, §5)
 
@@ -247,13 +252,16 @@ The refused constructs are exactly the ones the paper calls out as
 
 ## `OPTIONAL` and `DEFAULT` support (extension per `optional.txt`)
 
-The paper's §5.4 restricts SEQUENCE members to mandatory-only. We
-extend this per the rephrase in [`optional.txt`](optional.txt):
+The paper's §5.4 restricts SEQUENCE members to mandatory-only; §6
+acknowledges OPTIONAL/DEFAULT as a "syntactic lift left as future work".
+We extend the morphism per [`optional.txt`](optional.txt) with the
+following mapping:
 
 | ASN.1 | YANG sub-statement |
 | --- | --- |
 | mandatory field | `mandatory true;` |
-| `OPTIONAL` field | *(nothing — YANG leaves are optional by default)* |
+| `OPTIONAL` leaf field | *(nothing — YANG leaves are optional by default)* |
+| `OPTIONAL` SEQUENCE/CHOICE/SEQUENCE OF member | wrapped in a YANG `presence` container so the whole sub-tree is optional |
 | `DEFAULT v` field | `default "v";` |
 | CHOICE (non-optional alternatives, per §5.5) | `mandatory true;` on the `choice` line, *not* on individual `case` lines |
 
@@ -267,7 +275,6 @@ bijection holds at every level, but very deep types are almost always a
 sign of a design error. The transpiler refuses anything deeper than
 `--max-depth` (default `10`) with a `DepthExceeded` exception that names
 the offending location.
-
 
 ## License & scope
 
